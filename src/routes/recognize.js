@@ -1,6 +1,8 @@
 import express from "express";
 import multer from "multer";
 import fs from "fs";
+
+import { recognizeWithAcoustID } from "../services/acoustid.js";
 import { recognizeWithAudD } from "../services/audd.js";
 
 const router = express.Router();
@@ -18,17 +20,26 @@ router.post("/recognize", upload.single("audio"), async (req, res) => {
   let source = null;
 
   try {
-    // 🔹 ŞİMDİLİK: sadece AudD (AcoustID Adım 8'de)
-    const auddResult = await recognizeWithAudD(req.file.path);
+    // 1️⃣ ANA MOTOR — AcoustID (sınırsız)
+    const acoustIdResult = await recognizeWithAcoustID(req.file.path);
 
-    if (auddResult) {
-      recognition = auddResult;
-      source = "AudD";
+    if (acoustIdResult) {
+      recognition = acoustIdResult;
+      source = "AcoustID";
+    } else {
+      // 2️⃣ YEDEK MOTOR — AudD (limitli)
+      const auddResult = await recognizeWithAudD(req.file.path);
+
+      if (auddResult) {
+        recognition = auddResult;
+        source = "AudD";
+      }
     }
   } catch (err) {
-    // sessiz geçiyoruz (backend ASLA çökmez)
+    // Bilinçli olarak sessiz geçiyoruz
+    // Backend ASLA crash olmaz
   } finally {
-    // geçici dosyayı sil
+    // Geçici dosyayı her durumda sil
     fs.unlink(req.file.path, () => {});
   }
 
