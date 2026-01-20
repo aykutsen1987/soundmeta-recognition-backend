@@ -1,24 +1,21 @@
-import { recognizeWithAcoustID } from "../services/acoustid.js";
+import express from "express";
+import multer from "multer";
 
-router.post("/", upload.single("audio"), async (req, res) => {
-  try {
-    const fp = await generateFingerprint(req.file.path);
+const router = express.Router();
+const upload = multer({ dest: "uploads/" });
 
-    const acoustidResult = await recognizeWithAcoustID(
-      fp.fingerprint,
-      fp.duration
-    );
-
-    res.json({
-      success: true,
-      engine: "acoustid",
-      result: acoustidResult
-    });
-
-  } catch (e) {
-    res.status(500).json({
-      success: false,
-      error: e.message
-    });
-  }
+router.post("/recognize", upload.single("audio"), async (req, res) => {
+  res.json({
+    success: true,
+    message: "Audio received successfully",
+    file: {
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size
+    },
+    recognition: null,
+    source: null
+  });
 });
+
+export default router;
