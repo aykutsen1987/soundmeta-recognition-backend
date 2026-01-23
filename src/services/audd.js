@@ -2,40 +2,62 @@ import axios from "axios";
 import FormData from "form-data";
 import fs from "fs";
 
-const AUDD_API_TOKEN = process.env.AUDD_API_TOKEN || "YOUR_API_TOKEN_HERE";
+// =======================
+// 🔑 ENV KONTROL
+// =======================
+const AUDD_API_TOKEN = process.env.AUDD_API_TOKEN;
+
+if (!AUDD_API_TOKEN) {
+  console.error("❌ [AudD] AUDD_API_TOKEN is missing in environment variables!");
+}
+
 const AUDD_ENDPOINT = "https://api.audd.io/";
 
+// =======================
+// 🎵 AudD Recognition
+// =======================
 export async function recognizeWithAudD(audioPath) {
   try {
     console.log("🔍 [AudD] Starting recognition...");
     console.log(`📂 File: ${audioPath}`);
 
-    // Dosya kontrolü
+    // =======================
+    // Dosya var mı?
+    // =======================
     if (!fs.existsSync(audioPath)) {
       console.error("❌ [AudD] File not found");
       return null;
     }
 
     const fileSize = fs.statSync(audioPath).size;
-    console.log(`📊 File size: ${fileSize} bytes (${(fileSize / 1024).toFixed(2)} KB)`);
+    console.log(
+      `📊 File size: ${fileSize} bytes (${(fileSize / 1024).toFixed(2)} KB)`
+    );
 
-    // AudD maksimum 1MB kabul eder
+    // =======================
+    // AudD LIMITLERİ
+    // =======================
     if (fileSize > 1 * 1024 * 1024) {
       console.warn("⚠️ [AudD] File too large (>1MB), skipping");
       return null;
     }
 
-    if (fileSize < 50 * 1024) {
-      console.warn("⚠️ [AudD] File too small");
+    if (fileSize < 60 * 1024) {
+      console.warn("⚠️ [AudD] File too small, recognition chance is low");
     }
 
-    // Form data oluştur
+    // =======================
+    // FormData
+    // =======================
     const formData = new FormData();
     formData.append("api_token", AUDD_API_TOKEN);
     formData.append("file", fs.createReadStream(audioPath));
-    formData.append("return", "apple_music,spotify");
 
-    console.log("📡 Sending to AudD API...");
+    // AudD önerilen parametreler
+    formData.append("return", "apple_music,spotify");
+    formData.append("accurate_offsets", "true");
+
+    console.log("📡 Sending request to AudD API...");
 
     const response = await axios.post(AUDD_ENDPOINT, formData, {
       headers: {
@@ -43,13 +65,17 @@ export async function recognizeWithAudD(audioPath) {
       },
       timeout: 30000,
       maxContentLength: 2 * 1024 * 1024,
-      maxBodyLength: 2 * 1024 * 1024
+      maxBodyLength: 2 * 1024 * 1024,
+      validateStatus: (status) => status >= 200 && status < 500
     });
 
-    console.log(`📥 AudD Response: ${response.status}`);
+    console.log(`📥 AudD HTTP Status: ${response.status}`);
 
-    if (response.data.status !== "success") {
-      console.error("❌ [AudD] API returned error:", response.data);
+    // =======================
+    // API seviyesinde hata
+    // =======================
+    if (!response.data || response.data.status !== "success") {
+      console.warn("⚠️ [AudD] API returned non-success:", response.data);
       return null;
     }
 
@@ -60,23 +86,37 @@ export async function recognizeWithAudD(audioPath) {
 
     const result = response.data.result;
 
-    // Album art - Spotify veya Apple Music'ten al
+    // =======================
+    // Album Art seçimi
+    // =======================
     let albumArt = "";
-    if (result.spotify && result.spotify.album && result.spotify.album.images) {
-      const images = result.spotify.album.images;
-      albumArt = images.length > 0 ? images[0].url : "";
+
+    if (
+      result.spotify &&
+      result.spotify.album &&
+      Array.isArray(result.spotify.album.images)
+    ) {
+      albumArt =
+        result.spotify.album.images.length > 0
+          ? result.spotify.album.images[0].url
+          : "";
     } else if (result.apple_music && result.apple_music.artwork) {
       albumArt = result.apple_music.artwork.url
-        .replace("{w}", "250")
-        .replace("{h}", "250");
+        .replace("{w}", "300")
+        .replace("{h}", "300");
     }
 
+    // =======================
+    // Final Track Obj
+    // =======================
     const trackInfo = {
       title: result.title || "Unknown Track",
       artist: result.artist || "Unknown Artist",
       album: result.album || "",
       albumArt: albumArt,
-      year: result.release_date ? result.release_date.substring(0, 4) : ""
+      year: result.release_date
+        ? result.release_date.substring(0, 4)
+        : ""
     };
 
     console.log("✅ [AudD] Recognition successful:");
@@ -90,7 +130,10 @@ export async function recognizeWithAudD(audioPath) {
     if (error.code === "ECONNABORTED") {
       console.error("⏱️ [AudD] Request timeout");
     } else if (error.response) {
-      console.error(`❌ [AudD] API Error ${error.response.status}:`, error.response.data);
+      console.error(
+        `❌ [AudD] API Error ${error.response.status}:`,
+        error.response.data
+      );
     } else {
       console.error("❌ [AudD] Error:", error.message);
     }
