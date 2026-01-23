@@ -1,7 +1,6 @@
 import express from "express";
 import multer from "multer";
 import fs from "fs";
-import path from "path";
 import { execSync } from "child_process";
 
 import { recognizeWithAcoustID } from "../services/acoustid.js";
@@ -54,7 +53,6 @@ function validateWavFile(filePath) {
       channels,
       sampleRate,
       bitsPerSample,
-      dataSize,
       duration
     };
   } catch (err) {
@@ -81,12 +79,12 @@ router.post("/", upload.single("audio"), async (req, res) => {
   console.log(`   Size: ${(req.file.size / 1024).toFixed(2)} KB`);
   console.log(`   Path: ${req.file.path}`);
 
+  const originalPath = req.file.path;
+  const optimizedPath = originalPath + "_optimized.wav";
+
   let recognition = null;
   let source = null;
   let validationError = null;
-
-  const originalPath = req.file.path;
-  const auddPath = originalPath + "_audd.wav";
 
   try {
     // =======================
@@ -106,38 +104,40 @@ router.post("/", upload.single("audio"), async (req, res) => {
       }
     }
 
-    // =======================
-    // 2️⃣ AcoustID
-    // =======================
-    if (!validationError) {
-      console.log("\n🔍 Trying AcoustID...");
-      const acoustIdResult = await recognizeWithAcoustID(originalPath);
+    if (validationError) throw new Error(validationError);
 
-      if (acoustIdResult) {
-        recognition = acoustIdResult;
-        source = "AcoustID";
-      }
+    // =======================
+    // 2️⃣ Optimize audio (ALTIN ADIM)
+    // =======================
+    console.log("🎚️ Optimizing audio for recognition (ffmpeg)...");
+
+    execSync(
+      `ffmpeg -y -i "${originalPath}" ` +
+      `-ac 1 -ar 22050 -ss 2 -t 8 -af loudnorm ` +
+      `"${optimizedPath}"`,
+      { stdio: "ignore" }
+    );
+
+    const optimizedSizeKB = fs.statSync(optimizedPath).size / 1024;
+    console.log(`📦 Optimized WAV size: ${optimizedSizeKB.toFixed(2)} KB`);
+
+    // =======================
+    // 3️⃣ AcoustID (optimize edilmiş sesle)
+    // =======================
+    console.log("\n🔍 Trying AcoustID...");
+    const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
+
+    if (acoustIdResult) {
+      recognition = acoustIdResult;
+      source = "AcoustID";
     }
 
     // =======================
-    // 3️⃣ AudD (ffmpeg ile)
+    // 4️⃣ AudD (aynı optimize sesle)
     // =======================
-    if (!recognition && !validationError) {
-      console.log("\n🔧 Preparing audio for AudD (ffmpeg)...");
-
-      execSync(
-        `ffmpeg -y -i "${originalPath}" -ac 1 -ar 22050 -ss 3 -t 9 "${auddPath}"`
-      );
-
-      const sizeMB = fs.statSync(auddPath).size / 1024 / 1024;
-      console.log(`📦 AudD WAV size: ${sizeMB.toFixed(2)} MB`);
-
-      if (sizeMB > 1) {
-        throw new Error("AudD audio still too large");
-      }
-
-      console.log("🔍 Trying AudD...");
-      const auddResult = await recognizeWithAudD(auddPath);
+    if (!recognition) {
+      console.log("\n🔍 Trying AudD...");
+      const auddResult = await recognizeWithAudD(optimizedPath);
 
       if (auddResult) {
         recognition = auddResult;
@@ -153,7 +153,7 @@ router.post("/", upload.single("audio"), async (req, res) => {
     // 🗑️ Cleanup
     // =======================
     if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
-    if (fs.existsSync(auddPath)) fs.unlinkSync(auddPath);
+    if (fs.existsSync(optimizedPath)) fs.unlinkSync(optimizedPath);
   }
 
   const response = {
