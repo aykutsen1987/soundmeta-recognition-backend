@@ -2,31 +2,28 @@ import express from "express";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
 
 import { recognizeWithAcoustID } from "../services/acoustid.js";
 import { recognizeWithAudD } from "../services/audd.js";
 
 const router = express.Router();
 
-// ✅ Multer konfigürasyonu
+// =======================
+// ✅ Multer config
+// =======================
 const upload = multer({
   dest: "uploads/",
-  limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB max
-  },
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    // Sadece audio dosyalarını kabul et
-    if (file.mimetype.startsWith("audio/")) {
-      cb(null, true);
-    } else {
-      cb(new Error("Only audio files are allowed"));
-    }
+    if (file.mimetype.startsWith("audio/")) cb(null, true);
+    else cb(new Error("Only audio files are allowed"));
   }
 });
 
-/**
- * ✅ WAV dosyası validasyonu
- */
+// =======================
+// ✅ WAV validation
+// =======================
 function validateWavFile(filePath) {
   try {
     const buffer = Buffer.alloc(44);
@@ -34,35 +31,23 @@ function validateWavFile(filePath) {
     fs.readSync(fd, buffer, 0, 44, 0);
     fs.closeSync(fd);
 
-    // RIFF header kontrolü
-    const riff = buffer.toString("ascii", 0, 4);
-    if (riff !== "RIFF") {
-      return { valid: false, error: "Not a valid RIFF file" };
-    }
+    if (buffer.toString("ascii", 0, 4) !== "RIFF")
+      return { valid: false, error: "Not RIFF" };
 
-    // WAVE format kontrolü
-    const wave = buffer.toString("ascii", 8, 12);
-    if (wave !== "WAVE") {
-      return { valid: false, error: "Not a valid WAVE file" };
-    }
+    if (buffer.toString("ascii", 8, 12) !== "WAVE")
+      return { valid: false, error: "Not WAVE" };
 
-    // Audio format (PCM = 1)
     const audioFormat = buffer.readUInt16LE(20);
-    if (audioFormat !== 1) {
-      return { valid: false, error: `Unsupported audio format: ${audioFormat}` };
-    }
+    if (audioFormat !== 1)
+      return { valid: false, error: "Not PCM" };
 
-    // Channels
     const channels = buffer.readUInt16LE(22);
-
-    // Sample rate
     const sampleRate = buffer.readUInt32LE(24);
-
-    // Bits per sample
     const bitsPerSample = buffer.readUInt16LE(34);
-
-    // Data size
     const dataSize = buffer.readUInt32LE(40);
+
+    const duration =
+      dataSize / (sampleRate * channels * (bitsPerSample / 8));
 
     return {
       valid: true,
@@ -70,91 +55,93 @@ function validateWavFile(filePath) {
       sampleRate,
       bitsPerSample,
       dataSize,
-      duration: dataSize / (sampleRate * channels * (bitsPerSample / 8))
+      duration
     };
-
-  } catch (error) {
-    return { valid: false, error: error.message };
+  } catch (err) {
+    return { valid: false, error: err.message };
   }
 }
 
+// =======================
+// 🎵 POST /recognize
+// =======================
 router.post("/", upload.single("audio"), async (req, res) => {
   console.log("\n=== 🎵 NEW RECOGNITION REQUEST ===");
   console.log(`⏰ Time: ${new Date().toISOString()}`);
 
   if (!req.file) {
-    console.error("❌ No file uploaded");
     return res.status(400).json({
       success: false,
-      message: "No audio file uploaded",
-      error: "Missing file"
+      message: "No audio file uploaded"
     });
   }
 
   console.log("📂 File received:");
   console.log(`   Name: ${req.file.originalname}`);
-  console.log(`   Type: ${req.file.mimetype}`);
-  console.log(`   Size: ${req.file.size} bytes (${(req.file.size / 1024).toFixed(2)} KB)`);
+  console.log(`   Size: ${(req.file.size / 1024).toFixed(2)} KB`);
   console.log(`   Path: ${req.file.path}`);
 
   let recognition = null;
   let source = null;
   let validationError = null;
 
-  try {
-    // ✅ 1. Dosya boyutu kontrolü
-    if (req.file.size < 50 * 1024) {
-      validationError = "File too small (< 50KB)";
-      console.warn(`⚠️ ${validationError}`);
-    } else if (req.file.size > 5 * 1024 * 1024) {
-      validationError = "File too large (> 5MB)";
-      console.warn(`⚠️ ${validationError}`);
-    }
+  const originalPath = req.file.path;
+  const auddPath = originalPath + "_audd.wav";
 
-    // ✅ 2. WAV formatı validasyonu
-    const validation = validateWavFile(req.file.path);
-    
+  try {
+    // =======================
+    // 1️⃣ WAV validation
+    // =======================
+    const validation = validateWavFile(originalPath);
+
     if (!validation.valid) {
       validationError = validation.error;
-      console.error(`❌ WAV validation failed: ${validationError}`);
+      console.warn("⚠️ WAV invalid:", validationError);
     } else {
-      console.log("✅ WAV file valid:");
-      console.log(`   Channels: ${validation.channels}`);
-      console.log(`   Sample Rate: ${validation.sampleRate} Hz`);
-      console.log(`   Bits/Sample: ${validation.bitsPerSample}`);
+      console.log("✅ WAV valid:");
       console.log(`   Duration: ${validation.duration.toFixed(2)}s`);
 
-      // Duration kontrolü
       if (validation.duration < 3) {
-        validationError = "Audio too short (< 3 seconds)";
-        console.warn(`⚠️ ${validationError}`);
-      } else if (validation.duration > 15) {
-        console.warn(`⚠️ Audio very long (${validation.duration.toFixed(2)}s), processing may be slow`);
+        validationError = "Audio too short (<3s)";
       }
     }
 
-    // ✅ 3. Tanıma işlemi (validation başarılıysa)
+    // =======================
+    // 2️⃣ AcoustID
+    // =======================
     if (!validationError) {
-      // 3a. AcoustID (ana motor)
       console.log("\n🔍 Trying AcoustID...");
-      const acoustIdResult = await recognizeWithAcoustID(req.file.path);
+      const acoustIdResult = await recognizeWithAcoustID(originalPath);
 
       if (acoustIdResult) {
         recognition = acoustIdResult;
         source = "AcoustID";
-        console.log("✅ AcoustID success!");
-      } else {
-        // 3b. AudD (yedek motor)
-        console.log("\n🔍 AcoustID failed, trying AudD...");
-        const auddResult = await recognizeWithAudD(req.file.path);
+      }
+    }
 
-        if (auddResult) {
-          recognition = auddResult;
-          source = "AudD";
-          console.log("✅ AudD success!");
-        } else {
-          console.warn("⚠️ Both recognition services failed");
-        }
+    // =======================
+    // 3️⃣ AudD (ffmpeg ile)
+    // =======================
+    if (!recognition && !validationError) {
+      console.log("\n🔧 Preparing audio for AudD (ffmpeg)...");
+
+      execSync(
+        `ffmpeg -y -i "${originalPath}" -ac 1 -ar 22050 -ss 3 -t 9 "${auddPath}"`
+      );
+
+      const sizeMB = fs.statSync(auddPath).size / 1024 / 1024;
+      console.log(`📦 AudD WAV size: ${sizeMB.toFixed(2)} MB`);
+
+      if (sizeMB > 1) {
+        throw new Error("AudD audio still too large");
+      }
+
+      console.log("🔍 Trying AudD...");
+      const auddResult = await recognizeWithAudD(auddPath);
+
+      if (auddResult) {
+        recognition = auddResult;
+        source = "AudD";
       }
     }
 
@@ -162,37 +149,25 @@ router.post("/", upload.single("audio"), async (req, res) => {
     console.error("❌ Recognition error:", err.message);
     validationError = err.message;
   } finally {
-    // ✅ Geçici dosyayı sil
-    try {
-      if (fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-        console.log("🗑️ Temporary file deleted");
-      }
-    } catch (cleanupError) {
-      console.error("⚠️ Failed to delete temp file:", cleanupError.message);
-    }
+    // =======================
+    // 🗑️ Cleanup
+    // =======================
+    if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
+    if (fs.existsSync(auddPath)) fs.unlinkSync(auddPath);
   }
 
-  // ✅ Response
   const response = {
     success: recognition !== null,
-    message: recognition 
+    message: recognition
       ? "Track recognized successfully"
       : validationError || "Could not recognize the track",
-    file: {
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size
-    },
     recognition,
-    source,
-    error: validationError
+    source
   };
 
   console.log("\n📤 Response:");
   console.log(`   Success: ${response.success}`);
   console.log(`   Source: ${source || "None"}`);
-  console.log(`   Track: ${recognition ? `${recognition.title} - ${recognition.artist}` : "N/A"}`);
   console.log("=== 🏁 REQUEST COMPLETE ===\n");
 
   return res.json(response);
