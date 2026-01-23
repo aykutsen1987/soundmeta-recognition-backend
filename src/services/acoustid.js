@@ -3,61 +3,86 @@ import FormData from "form-data";
 import fs from "fs";
 import { generateFingerprint } from "../utils/fingerprint.js";
 
-const ACOUSTID_API_KEY = process.env.ACOUSTID_API_KEY || "YOUR_API_KEY_HERE";
+// =======================
+// 🔑 ENV KONTROL
+// =======================
+const ACOUSTID_API_KEY = process.env.ACOUSTID_API_KEY;
+
+if (!ACOUSTID_API_KEY) {
+  console.error("❌ [AcoustID] ACOUSTID_API_KEY is missing in environment variables!");
+}
+
 const ACOUSTID_ENDPOINT = "https://api.acoustid.org/v2/lookup";
 
+// =======================
+// 🎵 AcoustID Recognition
+// =======================
 export async function recognizeWithAcoustID(audioPath) {
   try {
     console.log("🔍 [AcoustID] Starting recognition...");
     console.log(`📂 File: ${audioPath}`);
 
+    // =======================
     // Dosya kontrolü
+    // =======================
     if (!fs.existsSync(audioPath)) {
       console.error("❌ [AcoustID] File not found");
       return null;
     }
 
     const fileSize = fs.statSync(audioPath).size;
-    console.log(`📊 File size: ${fileSize} bytes (${(fileSize / 1024).toFixed(2)} KB)`);
+    console.log(
+      `📊 File size: ${fileSize} bytes (${(fileSize / 1024).toFixed(2)} KB)`
+    );
 
     if (fileSize < 50 * 1024) {
-      console.warn("⚠️ [AcoustID] File too small, may not contain enough audio");
+      console.warn("⚠️ [AcoustID] File too small, fingerprint quality may be low");
     }
 
-    // 1️⃣ Fingerprint oluştur
+    // =======================
+    // 1️⃣ Fingerprint
+    // =======================
     console.log("🔐 Generating fingerprint...");
     const fingerprintData = await generateFingerprint(audioPath);
 
-    if (!fingerprintData || !fingerprintData.fingerprint) {
-      console.error("❌ [AcoustID] Failed to generate fingerprint");
+    if (
+      !fingerprintData ||
+      !fingerprintData.fingerprint ||
+      !fingerprintData.duration
+    ) {
+      console.error("❌ [AcoustID] Invalid fingerprint data");
       return null;
     }
 
-    console.log(`✅ Fingerprint generated (duration: ${fingerprintData.duration}s)`);
+    console.log(
+      `✅ Fingerprint generated (duration: ${fingerprintData.duration.toFixed(2)}s)`
+    );
 
-    // Duration kontrolü
     if (fingerprintData.duration < 3) {
       console.warn("⚠️ [AcoustID] Audio too short (< 3 seconds)");
       return null;
     }
 
-    // 2️⃣ AcoustID API'ye gönder
+    // =======================
+    // 2️⃣ API Request
+    // =======================
     const formData = new FormData();
     formData.append("client", ACOUSTID_API_KEY);
     formData.append("duration", Math.floor(fingerprintData.duration));
     formData.append("fingerprint", fingerprintData.fingerprint);
-    formData.append("meta", "recordings releasegroups compress");
+    formData.append("meta", "recordings releasegroups artists");
 
     console.log("📡 Sending to AcoustID API...");
 
     const response = await axios.post(ACOUSTID_ENDPOINT, formData, {
       headers: formData.getHeaders(),
-      timeout: 30000
+      timeout: 30000,
+      validateStatus: (status) => status >= 200 && status < 500
     });
 
-    console.log(`📥 AcoustID Response: ${response.status}`);
+    console.log(`📥 AcoustID HTTP Status: ${response.status}`);
 
-    if (response.data.status !== "ok") {
+    if (!response.data || response.data.status !== "ok") {
       console.error("❌ [AcoustID] API returned error:", response.data);
       return null;
     }
@@ -67,12 +92,18 @@ export async function recognizeWithAcoustID(audioPath) {
       return null;
     }
 
-    // En iyi sonucu seç (score en yüksek olan)
-    const bestResult = response.data.results.reduce((best, current) => 
-      (current.score > (best?.score || 0)) ? current : best
+    // =======================
+    // En iyi sonucu seç
+    // =======================
+    const bestResult = response.data.results.reduce(
+      (best, current) =>
+        current.score > (best?.score || 0) ? current : best,
+      null
     );
 
-    console.log(`🎯 Best match score: ${(bestResult.score * 100).toFixed(1)}%`);
+    console.log(
+      `🎯 Best match score: ${(bestResult.score * 100).toFixed(1)}%`
+    );
 
     if (bestResult.score < 0.5) {
       console.warn("⚠️ [AcoustID] Match confidence too low");
@@ -85,8 +116,10 @@ export async function recognizeWithAcoustID(audioPath) {
     }
 
     const recording = bestResult.recordings[0];
-    
-    // Album ve cover art bilgisi
+
+    // =======================
+    // Metadata
+    // =======================
     let album = "";
     let albumArt = "";
     let year = "";
@@ -94,14 +127,12 @@ export async function recognizeWithAcoustID(audioPath) {
     if (recording.releasegroups && recording.releasegroups.length > 0) {
       const releaseGroup = recording.releasegroups[0];
       album = releaseGroup.title || "";
-      
-      // MusicBrainz cover art
+
       if (releaseGroup.id) {
         albumArt = `https://coverartarchive.org/release-group/${releaseGroup.id}/front-250`;
       }
     }
 
-    // Artist bilgisi
     let artist = "Unknown Artist";
     if (recording.artists && recording.artists.length > 0) {
       artist = recording.artists.map(a => a.name).join(", ");
@@ -109,10 +140,10 @@ export async function recognizeWithAcoustID(audioPath) {
 
     const result = {
       title: recording.title || "Unknown Track",
-      artist: artist,
-      album: album,
-      albumArt: albumArt,
-      year: year
+      artist,
+      album,
+      albumArt,
+      year
     };
 
     console.log("✅ [AcoustID] Recognition successful:");
@@ -126,7 +157,10 @@ export async function recognizeWithAcoustID(audioPath) {
     if (error.code === "ECONNABORTED") {
       console.error("⏱️ [AcoustID] Request timeout");
     } else if (error.response) {
-      console.error(`❌ [AcoustID] API Error ${error.response.status}:`, error.response.data);
+      console.error(
+        `❌ [AcoustID] API Error ${error.response.status}:`,
+        error.response.data
+      );
     } else {
       console.error("❌ [AcoustID] Error:", error.message);
     }
