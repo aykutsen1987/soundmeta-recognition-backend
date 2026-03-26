@@ -1,7 +1,7 @@
 {
   "name": "soundmeta-recognition-backend",
   "version": "1.0.0",
-  "description": "Music recognition backend (AcoustID + AudD fallback)",
+  "description": "Music recognition backend (AcoustID + AudD + Groq fallback)",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
     "axios": "^1.6.8",
-    "form-data": "^4.0.0"
+    "form-data": "^4.0.0",
+    "groq-sdk": "^0.3.3" 
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
