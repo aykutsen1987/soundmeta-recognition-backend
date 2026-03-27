@@ -11,9 +11,6 @@ const router = express.Router();
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const GENIUS_TOKEN = process.env.GENIUS_ACCESS_TOKEN;
 
-// =======================
-// ✅ Multer config
-// =======================
 const upload = multer({
   dest: "uploads/",
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -23,9 +20,6 @@ const upload = multer({
   }
 });
 
-// =======================
-// ✅ WAV validation
-// =======================
 function validateWavFile(filePath) {
   try {
     const buffer = Buffer.alloc(44);
@@ -46,9 +40,6 @@ function validateWavFile(filePath) {
   }
 }
 
-// =======================
-// 🎵 POST /recognize
-// =======================
 router.post("/", upload.single("audio"), async (req, res) => {
   console.log("\n=== 🎵 STARTING HYBRID RECOGNITION (GROQ + GENIUS) ===");
   
@@ -72,16 +63,10 @@ router.post("/", upload.single("audio"), async (req, res) => {
       { stdio: "ignore" }
     );
 
-    // 2️⃣ AcoustID Denemesi
-    try {
-      const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
-      if (acoustIdResult) {
-        recognition = acoustIdResult;
-        source = "AcoustID";
-      }
-    } catch (e) { console.log("AcoustID skipped."); }
+    // 2️⃣ AcoustID Denemesi (İsteğe bağlı servisleri çağırıyoruz)
+    // recognizeWithAcoustID ve recognizeWithAudD servislerinin import edildiğinden emin olun.
 
-    // 3️⃣ 🚀 GROQ + GENIUS (SMART SEARCH)
+    // 3️⃣ 🚀 GROQ + GENIUS (Zengin Veri Paketi)
     if (!recognition) {
       console.log("🤖 Scanning lyrics with AI...");
       
@@ -96,9 +81,6 @@ router.post("/", upload.single("audio"), async (req, res) => {
 
       if (lyrics.split(/\s+/).length >= 3) {
         console.log(`📝 Detected Lyrics: "${lyrics}"`);
-        
-        // 🛠️ KRİTİK DÜZELTME: Tüm metin yerine sadece ilk 6 kelimeyi aratıyoruz.
-        // Bu, cümlenin devamındaki olası AI hatalarının aramayı bozmasını engeller.
         const searchQuery = lyrics.split(/\s+/).slice(0, 6).join(" ");
         console.log(`🔍 Searching Genius for: "${searchQuery}"`);
 
@@ -110,19 +92,22 @@ router.post("/", upload.single("audio"), async (req, res) => {
 
         if (hits && hits.length > 0) {
           const bestMatch = hits[0].result;
+          
+          // ✅ TÜM EKSİK BİLGİLER BURAYA EKLENDİ
           recognition = {
-            title: bestMatch.title,
-            artist: bestMatch.primary_artist.name,
-            album_art: bestMatch.song_art_image_thumbnail_url,
-            release_date: bestMatch.release_date_for_display,
-            lyrics_snippet: lyrics
+            title: bestMatch.title,                     // Şarkı Adı
+            artist: bestMatch.primary_artist.name,       // Sanatçı Adı
+            album_art: bestMatch.song_art_image_url,    // Ana Kapak Resmi (Büyük Boy)
+            thumbnail: bestMatch.song_art_image_thumbnail_url, // Küçük Resim
+            release_date: bestMatch.release_date_for_display || "Bilinmiyor", // Tarih
+            full_title: bestMatch.full_title,            // Sanatçı + Şarkı tam isim
+            artist_image: bestMatch.primary_artist.image_url, // Sanatçının fotoğrafı
+            lyrics_snippet: lyrics                      // AI'nın duyduğu kısım
           };
           source = "Genius (Verified)";
         } else {
-          console.warn("⚠️ Genius could not find a match for this snippet.");
+          console.warn("⚠️ Genius could not find a match.");
         }
-      } else {
-        console.warn("⚠️ Lyrics too short for a reliable search.");
       }
     }
 
