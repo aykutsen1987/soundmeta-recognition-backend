@@ -3,7 +3,7 @@ import multer from "multer";
 import fs from "fs";
 import { execSync } from "child_process";
 import Groq from "groq-sdk";
-import axios from "axios"; // ✅ Genius API araması için eklendi
+import axios from "axios";
 
 const router = express.Router();
 
@@ -16,7 +16,7 @@ const GENIUS_TOKEN = process.env.GENIUS_ACCESS_TOKEN;
 // =======================
 const upload = multer({
   dest: "uploads/",
-  limits: { fileSize: 15 * 1024 * 1024 }, // 25 saniye için limit uygun
+  limits: { fileSize: 15 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("audio/")) cb(null, true);
     else cb(new Error("Only audio files are allowed"));
@@ -65,14 +65,14 @@ router.post("/", upload.single("audio"), async (req, res) => {
     const validation = validateWavFile(originalPath);
     if (!validation.valid) throw new Error(validation.error);
 
-    // 1️⃣ FFmpeg: 25 saniye dinle (Sözleri yakalamak için en ideal süre)
+    // 1️⃣ FFmpeg: 25 saniye dinle
     console.log("🎚️ Optimizing 25 seconds of audio...");
     execSync(
       `ffmpeg -y -i "${originalPath}" -ac 1 -ar 16000 -ss 0 -t 25 -af loudnorm "${optimizedPath}"`,
       { stdio: "ignore" }
     );
 
-    // 2️⃣ Önce Hızlı Servisleri Dene (Parmak İzi)
+    // 2️⃣ AcoustID Denemesi
     try {
       const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
       if (acoustIdResult) {
@@ -81,11 +81,10 @@ router.post("/", upload.single("audio"), async (req, res) => {
       }
     } catch (e) { console.log("AcoustID skipped."); }
 
-    // 3️⃣ 🚀 EĞER BULUNAMADIYSA: GROQ + GENIUS İKİLİSİ DEVREDE
+    // 3️⃣ 🚀 GROQ + GENIUS (SMART SEARCH)
     if (!recognition) {
-      console.log("🤖 Traditional methods failed. Scanning lyrics with AI...");
+      console.log("🤖 Scanning lyrics with AI...");
       
-      // A: Sesi Yazıya Dök (Whisper-v3-Turbo)
       const transcription = await groq.audio.transcriptions.create({
         file: fs.createReadStream(optimizedPath),
         model: "whisper-large-v3-turbo",
@@ -95,12 +94,15 @@ router.post("/", upload.single("audio"), async (req, res) => {
 
       const lyrics = transcription.text.trim();
 
-      // B: En az 3 kelime duyulduysa Genius'ta ara
       if (lyrics.split(/\s+/).length >= 3) {
         console.log(`📝 Detected Lyrics: "${lyrics}"`);
-        console.log("🔍 Verifying on Genius database...");
+        
+        // 🛠️ KRİTİK DÜZELTME: Tüm metin yerine sadece ilk 6 kelimeyi aratıyoruz.
+        // Bu, cümlenin devamındaki olası AI hatalarının aramayı bozmasını engeller.
+        const searchQuery = lyrics.split(/\s+/).slice(0, 6).join(" ");
+        console.log(`🔍 Searching Genius for: "${searchQuery}"`);
 
-        const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(lyrics)}`, {
+        const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`, {
           headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
         });
 
@@ -111,19 +113,22 @@ router.post("/", upload.single("audio"), async (req, res) => {
           recognition = {
             title: bestMatch.title,
             artist: bestMatch.primary_artist.name,
-            album_art: bestMatch.song_art_image_thumbnail_url, // Şarkı kapak resmi ✅
+            album_art: bestMatch.song_art_image_thumbnail_url,
             release_date: bestMatch.release_date_for_display,
             lyrics_snippet: lyrics
           };
-          source = "Genius (Verified via Groq)";
+          source = "Genius (Verified)";
+        } else {
+          console.warn("⚠️ Genius could not find a match for this snippet.");
         }
+      } else {
+        console.warn("⚠️ Lyrics too short for a reliable search.");
       }
     }
 
   } catch (err) {
     console.error("❌ Error:", err.message);
   } finally {
-    // 🗑️ Temizlik
     if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
     if (fs.existsSync(optimizedPath)) fs.unlinkSync(optimizedPath);
   }
