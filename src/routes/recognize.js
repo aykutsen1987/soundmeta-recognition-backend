@@ -59,14 +59,14 @@ router.post("/", upload.single("audio"), async (req, res) => {
     const validation = validateWavFile(originalPath);
     if (!validation.valid) throw new Error(validation.error);
 
-    // 1️⃣ FFmpeg: Sesi optimize et (25 saniye)
-    console.log("🎚️ Optimizing audio...");
+    // 1️⃣ FFmpeg: Şarkının 20. saniyesinden başla ve 15 saniye dinle (Daha net sonuç verir)
+    console.log("🎚️ Optimizing audio (listening 20s-35s slice)...");
     execSync(
-      `ffmpeg -y -i "${originalPath}" -ac 1 -ar 16000 -ss 0 -t 25 -af loudnorm "${optimizedPath}"`,
+      `ffmpeg -y -i "${originalPath}" -ac 1 -ar 16000 -ss 20 -t 15 -af loudnorm "${optimizedPath}"`,
       { stdio: "ignore" }
     );
 
-    // 2️⃣ KATMAN 1: AcoustID (Ses Parmak İzi - Müzikten Bulma)
+    // 2️⃣ KATMAN 1: AcoustID (Ses Parmak İzi)
     try {
       console.log("🔍 Attempting Audio Fingerprinting...");
       const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
@@ -74,9 +74,11 @@ router.post("/", upload.single("audio"), async (req, res) => {
         recognition = acoustIdResult;
         source = "AcoustID (Direct Audio Match)";
       }
-    } catch (e) { console.log("⚠️ AcoustID skipped."); }
+    } catch (e) { 
+      console.log("⚠️ AcoustID failed: Check your API Key in environment variables."); 
+    }
 
-    // 3️⃣ KATMAN 2: GROQ WHISPER + GENIUS (Sözden Bulma)
+    // 3️⃣ KATMAN 2: GROQ WHISPER + GENIUS
     if (!recognition) {
       console.log("🤖 Analyzing lyrics with AI...");
       const transcription = await groq.audio.transcriptions.create({
@@ -85,72 +87,50 @@ router.post("/", upload.single("audio"), async (req, res) => {
         prompt: "Bu bir şarkı kaydıdır, duyduğun sözleri hatasız yaz."
       });
 
-      const lyrics = transcription.text.trim();
+      let lyrics = transcription.text.trim();
+      
+      // Klişe video bitiş cümlelerini temizle
+      if (lyrics.toLowerCase().includes("teşekkür ederim")) lyrics = "";
+
       const cleanLyrics = lyrics.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g,"");
 
       if (cleanLyrics.split(/\s+/).length >= 3) {
         console.log(`📝 Heard Lyrics: "${cleanLyrics}"`);
         
-        const words = cleanLyrics.split(/\s+/);
-        const searchAttempts = [
-          words.slice(0, 6).join(" "),
-          words.slice(Math.floor(words.length / 2) - 3, Math.floor(words.length / 2) + 3).join(" "),
-          words.slice(-6).join(" ")
-        ];
+        // Önce Llama'ya düzeltme yaptır (Kritik adım)
+        console.log("🧠 Asking Llama to predict and fix typos...");
+        const aiGuess = await groq.chat.completions.create({
+          messages: [
+            { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını JSON dön: {\"title\": \"...\", \"artist\": \"...\"}. Eğer bulamazsan null dön." },
+            { role: "user", content: `Bu sözler hangi gerçek şarkıya ait olabilir?: "${cleanLyrics}"` }
+          ],
+          model: "llama-3.1-8b-instant",
+          response_format: { type: "json_object" }
+        });
 
-        for (const query of searchAttempts) {
-          if (!query || query.length < 5) continue;
-          console.log(`🔍 Searching Genius: "${query}"`);
-          const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(query)}`, {
-            headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
-          });
+        const prediction = JSON.parse(aiGuess.choices[0].message.content);
+        
+        // Arama sorgusunu belirle (Eğer AI tahmin yaptıysa onu kullan, yoksa ham sözleri)
+        const searchQuery = (prediction && prediction.title) 
+          ? `${prediction.title} ${prediction.artist}` 
+          : cleanLyrics.split(/\s+/).slice(0, 6).join(" ");
 
-          if (geniusRes.data.response.hits.length > 0) {
-            const best = geniusRes.data.response.hits[0].result;
-            recognition = {
-              title: best.title,
-              artist: best.primary_artist.name,
-              album_art: best.song_art_image_url,
-              thumbnail: best.song_art_image_thumbnail_url,
-              release_date: best.release_date_for_display || "Bilinmiyor",
-              full_title: best.full_title
-            };
-            source = "Genius (Verified Lyrics)";
-            break;
-          }
-        }
+        console.log(`🔍 Final Genius Search: "${searchQuery}"`);
+        const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`, {
+          headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
+        });
 
-        // 4️⃣ KATMAN 3: LLAMA PREDICTION (Eğer Genius bulamazsa AI tahmin etsin)
-        if (!recognition) {
-          console.log("🧠 Genius failed. Asking Llama to predict...");
-          const aiGuess = await groq.chat.completions.create({
-            messages: [
-              { role: "system", content: "Sen uzman bir müzik kütüphanesisin. Verilen metne en yakın GERÇEK şarkıyı bul ve JSON olarak dön: {\"title\": \"...\", \"artist\": \"...\"}. Eğer bulamazsan null dön." },
-              { role: "user", content: `Bu sözler hangi şarkıya ait olabilir?: "${cleanLyrics}"` }
-            ],
-            model: "llama-3.1-8b-instant",
-            response_format: { type: "json_object" }
-          });
-
-          const prediction = JSON.parse(aiGuess.choices[0].message.content);
-          if (prediction && prediction.title) {
-            // Tahmin edilen şarkıyı tekrar Genius'ta doğrula (Resim çekmek için)
-            const verifyRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(prediction.title + " " + prediction.artist)}`, {
-              headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
-            });
-
-            if (verifyRes.data.response.hits.length > 0) {
-              const best = verifyRes.data.response.hits[0].result;
-              recognition = {
-                title: best.title,
-                artist: best.primary_artist.name,
-                album_art: best.song_art_image_url,
-                thumbnail: best.song_art_image_thumbnail_url,
-                full_title: best.full_title
-              };
-              source = "Groq AI Prediction + Genius Verify";
-            }
-          }
+        if (geniusRes.data.response.hits.length > 0) {
+          const best = geniusRes.data.response.hits[0].result;
+          recognition = {
+            title: best.title,
+            artist: best.primary_artist.name,
+            album_art: best.song_art_image_url,
+            thumbnail: best.song_art_image_thumbnail_url,
+            release_date: best.release_date_for_display || "Bilinmiyor",
+            full_title: best.full_title
+          };
+          source = (prediction && prediction.title) ? "AI Prediction + Genius" : "Genius (Verified Lyrics)";
         }
       }
     }
