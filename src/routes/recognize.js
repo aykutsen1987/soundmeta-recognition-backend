@@ -3,21 +3,20 @@ import multer from "multer";
 import fs from "fs";
 import { execSync } from "child_process";
 import Groq from "groq-sdk";
-
-import { recognizeWithAcoustID } from "../services/acoustid.js";
-import { recognizeWithAudD } from "../services/audd.js";
+import axios from "axios"; // ✅ Genius API araması için eklendi
 
 const router = express.Router();
 
-// ✅ Groq Yapılandırması
+// ✅ Yapılandırmalar
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const GENIUS_TOKEN = process.env.GENIUS_ACCESS_TOKEN;
 
 // =======================
 // ✅ Multer config
 // =======================
 const upload = multer({
   dest: "uploads/",
-  limits: { fileSize: 15 * 1024 * 1024 }, // 25 saniye için limit 15MB'a çıkarıldı
+  limits: { fileSize: 15 * 1024 * 1024 }, // 25 saniye için limit uygun
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("audio/")) cb(null, true);
     else cb(new Error("Only audio files are allowed"));
@@ -36,7 +35,6 @@ function validateWavFile(filePath) {
     if (buffer.toString("ascii", 0, 4) !== "RIFF") return { valid: false, error: "Not RIFF" };
     if (buffer.toString("ascii", 8, 12) !== "WAVE") return { valid: false, error: "Not WAVE" };
     const audioFormat = buffer.readUInt16LE(20);
-    if (audioFormat !== 1) return { valid: false, error: "Not PCM" };
     const channels = buffer.readUInt16LE(22);
     const sampleRate = buffer.readUInt32LE(24);
     const bitsPerSample = buffer.readUInt16LE(34);
@@ -52,7 +50,7 @@ function validateWavFile(filePath) {
 // 🎵 POST /recognize
 // =======================
 router.post("/", upload.single("audio"), async (req, res) => {
-  console.log("\n=== 🎵 STARTING DEEP RECOGNITION ===");
+  console.log("\n=== 🎵 STARTING HYBRID RECOGNITION (GROQ + GENIUS) ===");
   
   if (!req.file) {
     return res.status(400).json({ success: false, message: "No audio file uploaded" });
@@ -62,98 +60,68 @@ router.post("/", upload.single("audio"), async (req, res) => {
   const optimizedPath = originalPath + "_optimized.wav";
   let recognition = null;
   let source = null;
-  let validationError = null;
 
   try {
     const validation = validateWavFile(originalPath);
     if (!validation.valid) throw new Error(validation.error);
 
-    // 1️⃣ Ses Optimizasyonu (Süre 25 saniyeye çıkarıldı - Sözleri yakalamak için kritik)
-    console.log("🎚️ Optimizing 25 seconds of audio for AI...");
+    // 1️⃣ FFmpeg: 25 saniye dinle (Sözleri yakalamak için en ideal süre)
+    console.log("🎚️ Optimizing 25 seconds of audio...");
     execSync(
       `ffmpeg -y -i "${originalPath}" -ac 1 -ar 16000 -ss 0 -t 25 -af loudnorm "${optimizedPath}"`,
       { stdio: "ignore" }
     );
 
-    // 2️⃣ AcoustID Denemesi
+    // 2️⃣ Önce Hızlı Servisleri Dene (Parmak İzi)
     try {
-      console.log("🔍 Trying AcoustID...");
       const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
       if (acoustIdResult) {
         recognition = acoustIdResult;
         source = "AcoustID";
       }
-    } catch (e) { console.warn("⚠️ AcoustID failed."); }
+    } catch (e) { console.log("AcoustID skipped."); }
 
-    // 3️⃣ AudD Denemesi
+    // 3️⃣ 🚀 EĞER BULUNAMADIYSA: GROQ + GENIUS İKİLİSİ DEVREDE
     if (!recognition) {
-      try {
-        console.log("🔍 Trying AudD...");
-        const auddResult = await recognizeWithAudD(optimizedPath);
-        if (auddResult) {
-          recognition = auddResult;
-          source = "AudD";
-        }
-      } catch (e) { console.warn("⚠️ AudD failed."); }
-    }
-
-    // 4️⃣ 🚀 GROQ AI FALLBACK (Söz Odaklı ve Doğrulanmış Mod)
-    if (!recognition) {
-      console.log("🤖 Traditional methods failed. Activating Groq AI...");
+      console.log("🤖 Traditional methods failed. Scanning lyrics with AI...");
       
       // A: Sesi Yazıya Dök (Whisper-v3-Turbo)
       const transcription = await groq.audio.transcriptions.create({
         file: fs.createReadStream(optimizedPath),
         model: "whisper-large-v3-turbo",
         response_format: "json",
-        prompt: "Bu bir şarkı kaydıdır, lütfen duyduğun şarkı sözlerini eksiksiz ve hatasız yaz."
+        prompt: "Bu bir şarkı kaydıdır, duyduğun sözleri hatasız yaz."
       });
 
       const lyrics = transcription.text.trim();
 
-      // B: Eğer 4 kelimeden az duyulduysa uydurmaması için durdur
-      if (lyrics.split(/\s+/).length >= 4) {
-        console.log(`📝 Groq Heard: "${lyrics}"`);
+      // B: En az 3 kelime duyulduysa Genius'ta ara
+      if (lyrics.split(/\s+/).length >= 3) {
+        console.log(`📝 Detected Lyrics: "${lyrics}"`);
+        console.log("🔍 Verifying on Genius database...");
 
-        // C: Şarkıyı Tahmin Et (Llama-3.1 Strict Mode)
-        const completion = await groq.chat.completions.create({
-          messages: [
-            { 
-              role: "system", 
-              content: "Sen bir müzik kütüphanesisin. Sana verilen metni GERÇEK şarkılarla eşleştir. Eğer şarkıdan emin değilsen title kısmına 'Unknown' yaz. Asla uydurma. Sadece şu JSON formatında cevap ver: {\"title\": \"Şarkı Adı\", \"artist\": \"Sanatçı\", \"confidence\": 0-100}" 
-            },
-            { 
-              role: "user", 
-              content: `Bu sözler hangi gerçek şarkıya ait olabilir?: "${lyrics}"` 
-            }
-          ],
-          model: "llama-3.1-8b-instant",
-          response_format: { type: "json_object" },
-          temperature: 0 // Yaratıcılığı kapatıyoruz (Sadece gerçek veriler)
+        const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(lyrics)}`, {
+          headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
         });
 
-        const aiData = JSON.parse(completion.choices[0].message.content);
-        
-        // Güven puanı 75'ten düşükse veya bilinmiyor dediyse kabul etme
-        if (aiData.title && aiData.title !== "Unknown" && aiData.confidence > 75) {
+        const hits = geniusRes.data.response.hits;
+
+        if (hits && hits.length > 0) {
+          const bestMatch = hits[0].result;
           recognition = {
-            title: aiData.title,
-            artist: aiData.artist || "Bilinmiyor",
-            lyrics_found: lyrics,
-            confidence: aiData.confidence
+            title: bestMatch.title,
+            artist: bestMatch.primary_artist.name,
+            album_art: bestMatch.song_art_image_thumbnail_url, // Şarkı kapak resmi ✅
+            release_date: bestMatch.release_date_for_display,
+            lyrics_snippet: lyrics
           };
-          source = "Groq AI (Strict Mode)";
-        } else {
-          console.warn("⚠️ AI results are not confident enough.");
+          source = "Genius (Verified via Groq)";
         }
-      } else {
-        console.warn("⚠️ Lyrics too short to analyze.");
       }
     }
 
   } catch (err) {
-    console.error("❌ Critical Error:", err.message);
-    validationError = err.message;
+    console.error("❌ Error:", err.message);
   } finally {
     // 🗑️ Temizlik
     if (fs.existsSync(originalPath)) fs.unlinkSync(originalPath);
@@ -164,10 +132,10 @@ router.post("/", upload.single("audio"), async (req, res) => {
     success: recognition !== null,
     recognition,
     source,
-    message: recognition ? "Track found" : (validationError || "Could not identify the track")
+    message: recognition ? "Success" : "Track not found"
   };
 
-  console.log(`📤 Final Source: ${source || "None"}\n=== 🏁 COMPLETE ===`);
+  console.log(`📤 Source: ${source || "Failed"}\n=== 🏁 COMPLETE ===`);
   return res.json(response);
 });
 
