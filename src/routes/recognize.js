@@ -5,6 +5,9 @@ import { execSync } from "child_process";
 import Groq from "groq-sdk";
 import axios from "axios";
 
+// Diğer servislerin import edildiğinden emin olun (Gerekiyorsa)
+import { recognizeWithAcoustID } from "../services/acoustid.js";
+
 const router = express.Router();
 
 // ✅ Yapılandırmalar
@@ -63,10 +66,16 @@ router.post("/", upload.single("audio"), async (req, res) => {
       { stdio: "ignore" }
     );
 
-    // 2️⃣ AcoustID Denemesi (İsteğe bağlı servisleri çağırıyoruz)
-    // recognizeWithAcoustID ve recognizeWithAudD servislerinin import edildiğinden emin olun.
+    // 2️⃣ Parmak İzi Denemesi (AcoustID)
+    try {
+      const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
+      if (acoustIdResult) {
+        recognition = acoustIdResult;
+        source = "AcoustID";
+      }
+    } catch (e) { console.log("AcoustID skipped."); }
 
-    // 3️⃣ 🚀 GROQ + GENIUS (Zengin Veri Paketi)
+    // 3️⃣ 🚀 GROQ AI + AKILLI GENIUS ARAMA
     if (!recognition) {
       console.log("🤖 Scanning lyrics with AI...");
       
@@ -77,36 +86,46 @@ router.post("/", upload.single("audio"), async (req, res) => {
         prompt: "Bu bir şarkı kaydıdır, duyduğun sözleri hatasız yaz."
       });
 
-      const lyrics = transcription.text.trim();
+      // Noktalama işaretlerini temizle (Aramayı bozar)
+      const lyrics = transcription.text.trim().replace(/[.,/#!$%^&*;:{}=\-_`~()]/g,"");
 
       if (lyrics.split(/\s+/).length >= 3) {
         console.log(`📝 Detected Lyrics: "${lyrics}"`);
-        const searchQuery = lyrics.split(/\s+/).slice(0, 6).join(" ");
-        console.log(`🔍 Searching Genius for: "${searchQuery}"`);
+        
+        const words = lyrics.split(/\s+/);
+        
+        // 🛠️ AKILLI STRATEJİ: 3 farklı deneme yapıyoruz
+        const searchAttempts = [
+          words.slice(0, 6).join(" "),      // 1. Deneme: İlk 6 kelime
+          words.slice(2, 8).join(" "),      // 2. Deneme: Ortadan 6 kelime
+          words.slice(-6).join(" ")         // 3. Deneme: Sondan 6 kelime
+        ];
 
-        const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`, {
-          headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
-        });
+        for (const query of searchAttempts) {
+          if (!query || query.length < 5) continue;
 
-        const hits = geniusRes.data.response.hits;
+          console.log(`🔍 Trying Genius search for: "${query}"`);
+          const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(query)}`, {
+            headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
+          });
 
-        if (hits && hits.length > 0) {
-          const bestMatch = hits[0].result;
-          
-          // ✅ TÜM EKSİK BİLGİLER BURAYA EKLENDİ
-          recognition = {
-            title: bestMatch.title,                     // Şarkı Adı
-            artist: bestMatch.primary_artist.name,       // Sanatçı Adı
-            album_art: bestMatch.song_art_image_url,    // Ana Kapak Resmi (Büyük Boy)
-            thumbnail: bestMatch.song_art_image_thumbnail_url, // Küçük Resim
-            release_date: bestMatch.release_date_for_display || "Bilinmiyor", // Tarih
-            full_title: bestMatch.full_title,            // Sanatçı + Şarkı tam isim
-            artist_image: bestMatch.primary_artist.image_url, // Sanatçının fotoğrafı
-            lyrics_snippet: lyrics                      // AI'nın duyduğu kısım
-          };
-          source = "Genius (Verified)";
-        } else {
-          console.warn("⚠️ Genius could not find a match.");
+          const hits = geniusRes.data.response.hits;
+
+          if (hits && hits.length > 0) {
+            const bestMatch = hits[0].result;
+            recognition = {
+              title: bestMatch.title,
+              artist: bestMatch.primary_artist.name,
+              album_art: bestMatch.song_art_image_url, 
+              thumbnail: bestMatch.song_art_image_thumbnail_url,
+              release_date: bestMatch.release_date_for_display || "Bilinmiyor",
+              full_title: bestMatch.full_title,
+              artist_image: bestMatch.primary_artist.image_url,
+              lyrics_snippet: lyrics
+            };
+            source = "Genius (Verified)";
+            break; // Bir sonuç bulunduysa döngüden çık
+          }
         }
       }
     }
@@ -125,7 +144,7 @@ router.post("/", upload.single("audio"), async (req, res) => {
     message: recognition ? "Success" : "Track not found"
   };
 
-  console.log(`📤 Source: ${source || "Failed"}\n=== 🏁 COMPLETE ===`);
+  console.log(`📤 Final Source: ${source || "Failed"}\n=== 🏁 COMPLETE ===`);
   return res.json(response);
 });
 
