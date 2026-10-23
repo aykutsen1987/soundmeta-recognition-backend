@@ -8,6 +8,7 @@ import axios from "axios";
 // AcoustID servisinin dosya yolunun doğruluğundan emin olun
 import { recognizeWithAcoustID } from "../services/acoustid.js";
 import { recognizeWithAudD } from "../services/audd.js";
+import { recognizeWithShazam } from "../services/shazam.js";
 
 const router = express.Router();
 
@@ -92,9 +93,20 @@ router.post("/", upload.single("audio"), async (req, res) => {
       fs.copyFileSync(originalPath, optimizedPath); // ffmpeg yoksa orijinal ile devam
     }
 
-    // 2️⃣ KATMAN 1: AudD (mikrofon kaydı için en uygun)
+    // 2️⃣ KATMAN 0: Shazam (RapidAPI, gayriresmî) — orijinal 44.1kHz kayıtla
     try {
-      const auddResult = await recognizeWithAudD(optimizedPath);
+      const shazamResult = await recognizeWithShazam(originalPath);
+      if (shazamResult && shazamResult.title) {
+        recognition = shazamResult;
+        source = "Shazam";
+      }
+    } catch (e) {
+      console.log("⚠️ Shazam failed:", e.message);
+    }
+
+    // 2️⃣ KATMAN 1: AudD
+    try {
+      const auddResult = recognition ? null : await recognizeWithAudD(optimizedPath);
       if (auddResult && auddResult.title) {
         recognition = auddResult;
         source = "AudD";
