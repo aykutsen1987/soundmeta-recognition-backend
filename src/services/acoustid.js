@@ -66,16 +66,18 @@ export async function recognizeWithAcoustID(audioPath) {
     // =======================
     // 2️⃣ API Request
     // =======================
-    const formData = new FormData();
-    formData.append("client", ACOUSTID_API_KEY);
-    formData.append("duration", Math.floor(fingerprintData.duration));
-    formData.append("fingerprint", fingerprintData.fingerprint);
-    formData.append("meta", "recordings releasegroups artists");
+    // AcoustID POST için application/x-www-form-urlencoded bekler (multipart değil)
+    const params = new URLSearchParams();
+    params.append("client", ACOUSTID_API_KEY);
+    params.append("format", "json");
+    params.append("duration", String(Math.floor(fingerprintData.duration)));
+    params.append("fingerprint", fingerprintData.fingerprint);
+    params.append("meta", "recordings releasegroups artists");
 
     console.log("📡 Sending to AcoustID API...");
 
-    const response = await axios.post(ACOUSTID_ENDPOINT, formData, {
-      headers: formData.getHeaders(),
+    const response = await axios.post(ACOUSTID_ENDPOINT, params.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       timeout: 30000,
       validateStatus: (status) => status >= 200 && status < 500
     });
