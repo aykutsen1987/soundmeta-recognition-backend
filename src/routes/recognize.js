@@ -192,7 +192,7 @@ router.post("/", upload.single("audio"), async (req, res) => {
               const model = await getChatModel();
               const pick = await groq.chat.completions.create({
                 messages: [
-                  { role: "system", content: "Şarkı sözü uzmanısın. Verilen sözlerin hangi aday şarkıya ait olduğunu SADECE JSON olarak dön: {\"index\": N}. Hiçbiri kesin eşleşmiyorsa {\"index\": null}. Tahmin uydurma." },
+                  { role: "system", content: "Şarkı sözü uzmanısın. Verilen sözlerin hangi aday şarkıya ait olduğunu SADECE JSON olarak dön: {\"index\": N, \"confidence\": 0-1 arası sayı}. Sözlerle başlık/sanatçı ve şarkı içeriği uyumluysa en olası adayı seç. Hiçbiri olası değilse {\"index\": null, \"confidence\": 0}." },
                   { role: "user", content: `Sözler: "${cleanLyrics}"\nAdaylar:\n` + cands.map((c, i) => `${i}: ${c.title} - ${c.primary_artist.name}`).join("\n") }
                 ],
                 model,
@@ -202,7 +202,8 @@ router.post("/", upload.single("audio"), async (req, res) => {
               const raw2 = pick.choices[0].message.content || "";
               console.log("🧠 LLM pick raw:", raw2.slice(0, 200));
               const m2 = raw2.match(/\{[\s\S]*\}/);
-              const idx = m2 ? JSON.parse(m2[0]).index : null;
+              const parsed2 = m2 ? JSON.parse(m2[0]) : {};
+              const idx = (Number(parsed2.confidence) >= 0.5) ? parsed2.index : null;
               if (Number.isInteger(idx) && cands[idx]) {
                 const hit = cands[idx];
                 recognition = {
