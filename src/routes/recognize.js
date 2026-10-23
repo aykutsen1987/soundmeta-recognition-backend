@@ -7,6 +7,7 @@ import axios from "axios";
 
 // AcoustID servisinin dosya yolunun doğruluğundan emin olun
 import { recognizeWithAcoustID } from "../services/acoustid.js";
+import { recognizeWithAudD } from "../services/audd.js";
 
 const router = express.Router();
 
@@ -59,26 +60,42 @@ router.post("/", upload.single("audio"), async (req, res) => {
     const validation = validateWavFile(originalPath);
     if (!validation.valid) throw new Error(validation.error);
 
-    // 1️⃣ FFmpeg: Şarkının 20. saniyesinden başla ve 15 saniye dinle (Daha net sonuç verir)
-    console.log("🎚️ Optimizing audio (listening 20s-35s slice)...");
-    execSync(
-      `ffmpeg -y -i "${originalPath}" -ac 1 -ar 16000 -ss 20 -t 15 -af loudnorm "${optimizedPath}"`,
-      { stdio: "ignore" }
-    );
-
-    // 2️⃣ KATMAN 1: AcoustID (Ses Parmak İzi)
+    // 1️⃣ FFmpeg: 16kHz mono (AudD 1MB sınırına sığar). -ss kaldırıldı (kayıt zaten 15sn).
     try {
-      console.log("🔍 Attempting Audio Fingerprinting...");
-      const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
-      if (acoustIdResult && acoustIdResult.title) {
-        recognition = acoustIdResult;
-        source = "AcoustID (Direct Audio Match)";
-      }
-    } catch (e) { 
-      console.log("⚠️ AcoustID failed: Check your API Key in environment variables."); 
+      execSync(
+        `ffmpeg -y -i "${originalPath}" -ac 1 -ar 16000 "${optimizedPath}"`,
+        { stdio: "pipe" }
+      );
+    } catch (e) {
+      console.error("❌ FFmpeg failed (kurulu mu?):", e.stderr ? e.stderr.toString().slice(-300) : e.message);
+      fs.copyFileSync(originalPath, optimizedPath); // ffmpeg yoksa orijinal ile devam
     }
 
-    // 3️⃣ KATMAN 2: GROQ WHISPER + GENIUS
+    // 2️⃣ KATMAN 1: AudD (mikrofon kaydı için en uygun)
+    try {
+      const auddResult = await recognizeWithAudD(optimizedPath);
+      if (auddResult && auddResult.title) {
+        recognition = auddResult;
+        source = "AudD";
+      }
+    } catch (e) {
+      console.log("⚠️ AudD failed:", e.message);
+    }
+
+    // 2.5️⃣ KATMAN 2: AcoustID
+    if (!recognition) {
+      try {
+        const acoustIdResult = await recognizeWithAcoustID(optimizedPath);
+        if (acoustIdResult && acoustIdResult.title) {
+          recognition = acoustIdResult;
+          source = "AcoustID";
+        }
+      } catch (e) {
+        console.log("⚠️ AcoustID failed:", e.message);
+      }
+    }
+
+    // 3️⃣ KATMAN 3: GROQ WHISPER + GENIUS
     if (!recognition) {
       console.log("🤖 Analyzing lyrics with AI...");
       const transcription = await groq.audio.transcriptions.create({
@@ -125,9 +142,9 @@ router.post("/", upload.single("audio"), async (req, res) => {
           recognition = {
             title: best.title,
             artist: best.primary_artist.name,
-            album_art: best.song_art_image_url,
-            thumbnail: best.song_art_image_thumbnail_url,
-            release_date: best.release_date_for_display || "Bilinmiyor",
+            albumArt: best.song_art_image_url,
+            album: "",
+            year: (best.release_date_for_display || "").slice(-4),
             full_title: best.full_title
           };
           source = (prediction && prediction.title) ? "AI Prediction + Genius" : "Genius (Verified Lyrics)";
