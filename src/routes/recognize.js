@@ -33,7 +33,7 @@ async function getChatModel() {
     headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` }
   });
   const ids = res.data.data.map(m => m.id).filter(id => !/whisper|guard|tts|playai|distil/i.test(id));
-  const prefs = [/llama-3\.3-70b/, /llama-3\.1-8b/, /llama/, /gpt-oss/, /qwen/];
+  const prefs = [/gpt-oss-120b/, /llama-3\.3-70b/, /llama-3\.1-8b/, /llama/, /gpt-oss/, /qwen/];
   for (const p of prefs) {
     const f = ids.find(id => p.test(id));
     if (f) { cachedChatModel = f; break; }
@@ -139,15 +139,19 @@ router.post("/", upload.single("audio"), async (req, res) => {
         console.log("🧠 Asking Llama to predict and fix typos...");
         let prediction = null;
         try {
+          const model = await getChatModel();
           const aiGuess = await groq.chat.completions.create({
             messages: [
-              { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını JSON dön: {\"title\": \"...\", \"artist\": \"...\"}. Emin değilsen {\"title\": null, \"artist\": null} dön, ASLA tahmin uydurma." },
+              { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını SADECE JSON olarak dön, başka hiçbir şey yazma: {\"title\": \"...\", \"artist\": \"...\"}. Emin değilsen {\"title\": null, \"artist\": null} dön, ASLA tahmin uydurma." },
               { role: "user", content: `Bu sözler hangi gerçek şarkıya ait olabilir?: "${cleanLyrics}"` }
             ],
-            model: await getChatModel(),
-            response_format: { type: "json_object" }
+            model,
+            max_tokens: 2000,
+            ...(model.includes("gpt-oss") ? { reasoning_effort: "low" } : {})
           });
-          prediction = JSON.parse(aiGuess.choices[0].message.content);
+          const raw = aiGuess.choices[0].message.content || "";
+          const m = raw.match(/\{[\s\S]*\}/);
+          prediction = m ? JSON.parse(m[0]) : null;
         } catch (e) {
           console.log("⚠️ Llama failed:", e.message);
         }
