@@ -5,7 +5,7 @@ import fs from "fs";
 // =======================
 // 🔑 ENV KONTROL
 // =======================
-const AUDD_API_TOKEN = process.env.AUDD_API_TOKEN;
+const AUDD_API_TOKEN = (process.env.AUDD_API_TOKEN || "").trim();
 
 if (!AUDD_API_TOKEN) {
   console.error("❌ [AudD] AUDD_API_TOKEN is missing in environment variables!");

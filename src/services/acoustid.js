@@ -6,7 +6,7 @@ import { generateFingerprint } from "../utils/fingerprint.js";
 // =======================
 // 🔑 ENV KONTROL
 // =======================
-const ACOUSTID_API_KEY = process.env.ACOUSTID_API_KEY;
+const ACOUSTID_API_KEY = (process.env.ACOUSTID_API_KEY || "").trim();
 
 if (!ACOUSTID_API_KEY) {
   console.error("❌ [AcoustID] ACOUSTID_API_KEY is missing in environment variables!");

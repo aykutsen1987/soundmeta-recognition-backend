@@ -2,6 +2,13 @@ import express from "express";
 import fs from "fs";
 import recognizeRoute from "./routes/recognize.js";
 
+
+// 🔑 Anahtar kontrolü (değerin tamamı yazılmaz)
+for (const k of ["ACOUSTID_API_KEY", "AUDD_API_TOKEN", "GROQ_API_KEY", "GENIUS_ACCESS_TOKEN"]) {
+  const v = (process.env[k] || "").trim();
+  console.log(`🔑 ${k}: ${v ? `${v.slice(0, 2)}...${v.slice(-2)} (len ${v.length})` : "EKSİK"}`);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
