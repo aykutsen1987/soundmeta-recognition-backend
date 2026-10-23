@@ -116,17 +116,21 @@ router.post("/", upload.single("audio"), async (req, res) => {
         
         // Önce Llama'ya düzeltme yaptır (Kritik adım)
         console.log("🧠 Asking Llama to predict and fix typos...");
-        const aiGuess = await groq.chat.completions.create({
-          messages: [
-            { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını JSON dön: {\"title\": \"...\", \"artist\": \"...\"}. Eğer bulamazsan null dön." },
-            { role: "user", content: `Bu sözler hangi gerçek şarkıya ait olabilir?: "${cleanLyrics}"` }
-          ],
-          model: "llama-3.1-8b-instant",
-          response_format: { type: "json_object" }
-        });
+        let prediction = null;
+        try {
+          const aiGuess = await groq.chat.completions.create({
+            messages: [
+              { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını JSON dön: {\"title\": \"...\", \"artist\": \"...\"}. Eğer bulamazsan null dön." },
+              { role: "user", content: `Bu sözler hangi gerçek şarkıya ait olabilir?: "${cleanLyrics}"` }
+            ],
+            model: "llama-3.3-70b-versatile",
+            response_format: { type: "json_object" }
+          });
+          prediction = JSON.parse(aiGuess.choices[0].message.content);
+        } catch (e) {
+          console.log("⚠️ Llama failed:", e.message);
+        }
 
-        const prediction = JSON.parse(aiGuess.choices[0].message.content);
-        
         // Arama sorgusunu belirle (Eğer AI tahmin yaptıysa onu kullan, yoksa ham sözleri)
         const searchQuery = (prediction && prediction.title) 
           ? `${prediction.title} ${prediction.artist}` 
