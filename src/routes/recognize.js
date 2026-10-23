@@ -150,6 +150,7 @@ router.post("/", upload.single("audio"), async (req, res) => {
             ...(model.includes("gpt-oss") ? { reasoning_effort: "low" } : {})
           });
           const raw = aiGuess.choices[0].message.content || "";
+          console.log("🧠 LLM raw:", raw.slice(0, 300));
           const m = raw.match(/\{[\s\S]*\}/);
           prediction = m ? JSON.parse(m[0]) : null;
         } catch (e) {
@@ -179,7 +180,45 @@ router.post("/", upload.single("audio"), async (req, res) => {
             console.log("⚠️ Genius sonucu tahminle uyuşmadı, yanlış sonuç döndürülmüyor");
           }
         } else {
-          console.log("⚠️ Güvenilir tahmin yok, sonuç döndürülmüyor");
+          // Yedek: ham sözlerle Genius adayları çıkar, LLM'e aralarından seçtir
+          try {
+            const q = cleanLyrics.split(/\s+/).slice(0, 8).join(" ");
+            const gr = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(q)}`, {
+              headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
+            });
+            const cands = gr.data.response.hits.slice(0, 5).map(h => h.result);
+            console.log("🔎 Genius adayları:", cands.map(c => `${c.title} - ${c.primary_artist.name}`).join(" | "));
+            if (cands.length) {
+              const model = await getChatModel();
+              const pick = await groq.chat.completions.create({
+                messages: [
+                  { role: "system", content: "Şarkı sözü uzmanısın. Verilen sözlerin hangi aday şarkıya ait olduğunu SADECE JSON olarak dön: {\"index\": N}. Hiçbiri kesin eşleşmiyorsa {\"index\": null}. Tahmin uydurma." },
+                  { role: "user", content: `Sözler: "${cleanLyrics}"\nAdaylar:\n` + cands.map((c, i) => `${i}: ${c.title} - ${c.primary_artist.name}`).join("\n") }
+                ],
+                model,
+                max_tokens: 2000,
+                ...(model.includes("gpt-oss") ? { reasoning_effort: "low" } : {})
+              });
+              const raw2 = pick.choices[0].message.content || "";
+              console.log("🧠 LLM pick raw:", raw2.slice(0, 200));
+              const m2 = raw2.match(/\{[\s\S]*\}/);
+              const idx = m2 ? JSON.parse(m2[0]).index : null;
+              if (Number.isInteger(idx) && cands[idx]) {
+                const hit = cands[idx];
+                recognition = {
+                  title: hit.title,
+                  artist: hit.primary_artist.name,
+                  albumArt: hit.song_art_image_url,
+                  album: "",
+                  year: (hit.release_date_for_display || "").slice(-4)
+                };
+                source = "Genius candidates + AI";
+              }
+            }
+          } catch (e) {
+            console.log("⚠️ Candidate fallback failed:", e.message);
+          }
+          if (!recognition) console.log("⚠️ Güvenilir tahmin yok, sonuç döndürülmüyor");
         }
       }
     }
