@@ -24,6 +24,27 @@ const upload = multer({
   }
 });
 
+
+// Hesapta gerçekten erişilebilen bir sohbet modelini otomatik seç
+let cachedChatModel = null;
+async function getChatModel() {
+  if (cachedChatModel) return cachedChatModel;
+  const res = await axios.get("https://api.groq.com/openai/v1/models", {
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` }
+  });
+  const ids = res.data.data.map(m => m.id).filter(id => !/whisper|guard|tts|playai|distil/i.test(id));
+  const prefs = [/llama-3\.3-70b/, /llama-3\.1-8b/, /llama/, /gpt-oss/, /qwen/];
+  for (const p of prefs) {
+    const f = ids.find(id => p.test(id));
+    if (f) { cachedChatModel = f; break; }
+  }
+  if (!cachedChatModel) cachedChatModel = ids[0];
+  console.log("🧠 Using Groq model:", cachedChatModel, "| available:", ids.join(", "));
+  return cachedChatModel;
+}
+
+const norm = (t) => (t || "").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").trim();
+
 function validateWavFile(filePath) {
   try {
     const buffer = Buffer.alloc(44);
@@ -120,10 +141,10 @@ router.post("/", upload.single("audio"), async (req, res) => {
         try {
           const aiGuess = await groq.chat.completions.create({
             messages: [
-              { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını JSON dön: {\"title\": \"...\", \"artist\": \"...\"}. Eğer bulamazsan null dön." },
+              { role: "system", content: "Sen bir müzik uzmanısın. Kullanıcının yanlış duymuş olabileceği şarkı sözlerini düzelt ve GERÇEK şarkı adını ve sanatçısını JSON dön: {\"title\": \"...\", \"artist\": \"...\"}. Emin değilsen {\"title\": null, \"artist\": null} dön, ASLA tahmin uydurma." },
               { role: "user", content: `Bu sözler hangi gerçek şarkıya ait olabilir?: "${cleanLyrics}"` }
             ],
-            model: "llama-3.3-70b-versatile",
+            model: await getChatModel(),
             response_format: { type: "json_object" }
           });
           prediction = JSON.parse(aiGuess.choices[0].message.content);
@@ -132,26 +153,29 @@ router.post("/", upload.single("audio"), async (req, res) => {
         }
 
         // Arama sorgusunu belirle (Eğer AI tahmin yaptıysa onu kullan, yoksa ham sözleri)
-        const searchQuery = (prediction && prediction.title) 
-          ? `${prediction.title} ${prediction.artist}` 
-          : cleanLyrics.split(/\s+/).slice(0, 6).join(" ");
-
-        console.log(`🔍 Final Genius Search: "${searchQuery}"`);
-        const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`, {
-          headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
-        });
-
-        if (geniusRes.data.response.hits.length > 0) {
-          const best = geniusRes.data.response.hits[0].result;
-          recognition = {
-            title: best.title,
-            artist: best.primary_artist.name,
-            albumArt: best.song_art_image_url,
-            album: "",
-            year: (best.release_date_for_display || "").slice(-4),
-            full_title: best.full_title
-          };
-          source = (prediction && prediction.title) ? "AI Prediction + Genius" : "Genius (Verified Lyrics)";
+        if (prediction && prediction.title) {
+          const searchQuery = `${prediction.title} ${prediction.artist || ""}`.trim();
+          console.log(`🔍 Final Genius Search: "${searchQuery}"`);
+          const geniusRes = await axios.get(`https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`, {
+            headers: { 'Authorization': `Bearer ${GENIUS_TOKEN}` }
+          });
+          const hit = geniusRes.data.response.hits
+            .map(h => h.result)
+            .find(r => norm(r.title).includes(norm(prediction.title)) || norm(prediction.title).includes(norm(r.title)));
+          if (hit) {
+            recognition = {
+              title: hit.title,
+              artist: hit.primary_artist.name,
+              albumArt: hit.song_art_image_url,
+              album: "",
+              year: (hit.release_date_for_display || "").slice(-4)
+            };
+            source = "AI Prediction + Genius";
+          } else {
+            console.log("⚠️ Genius sonucu tahminle uyuşmadı, yanlış sonuç döndürülmüyor");
+          }
+        } else {
+          console.log("⚠️ Güvenilir tahmin yok, sonuç döndürülmüyor");
         }
       }
     }
